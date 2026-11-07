@@ -75,13 +75,13 @@ export async function isPublicDemoHost(): Promise<boolean> {
 }
 
 /**
- * Optional sign-in allowlist.
+ * Sign-in allowlist, required in production.
  *
  * A self-hosted instance on a public domain is open to signup: the email
  * provider creates an account for whoever asks for a magic link, and that
  * account gets its own workspace. ALLOWED_EMAILS closes it to a comma-separated
- * list of addresses. Left unset, sign-in behaves exactly as before, so an
- * existing deployment is unaffected.
+ * list of addresses. In production, an empty list denies everyone rather than
+ * leaving the instance open. Outside production, it allows everyone.
  */
 export function isEmailAllowedToSignIn(
   email: string | null | undefined
@@ -91,7 +91,11 @@ export function isEmailAllowedToSignIn(
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean);
 
-  if (allowed.length === 0) return true;
+  if (allowed.length === 0) {
+    if (process.env.NODE_ENV !== "production") return true;
+    console.error("[auth] Sign-in denied: ALLOWED_EMAILS is empty");
+    return false;
+  }
   if (!email) return false;
   return allowed.includes(email.toLowerCase());
 }

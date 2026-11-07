@@ -41,6 +41,22 @@ describe("sign-in allowlist", () => {
     expect(isEmailAllowedToSignIn("anyone@example.com")).toBe(true);
   });
 
+  it("denies everyone in production when ALLOWED_EMAILS is unset or empty", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ALLOWED_EMAILS", undefined as unknown as string);
+    expect(isEmailAllowedToSignIn("anyone@example.com")).toBe(false);
+    vi.stubEnv("ALLOWED_EMAILS", "  , ,  ");
+    expect(isEmailAllowedToSignIn("anyone@example.com")).toBe(false);
+  });
+
+  it("still allows listed addresses in production", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ALLOWED_EMAILS", "owner@example.com");
+    expect(isEmailAllowedToSignIn("owner@example.com")).toBe(true);
+    expect(isEmailAllowedToSignIn("stranger@example.com")).toBe(false);
+  });
+
   it("only allows listed addresses once ALLOWED_EMAILS is set", () => {
     vi.stubEnv("ALLOWED_EMAILS", "owner@example.com,team@example.com");
     expect(isEmailAllowedToSignIn("owner@example.com")).toBe(true);
