@@ -13,6 +13,7 @@ const {
   mockMatchKeywords,
   mockReserveDMSlot,
   mockReleaseDMSlot,
+  mockReservePublicReplySlot,
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
@@ -50,6 +51,7 @@ const {
   mockMatchKeywords: vi.fn(),
   mockReserveDMSlot: vi.fn(),
   mockReleaseDMSlot: vi.fn(),
+  mockReservePublicReplySlot: vi.fn(),
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
@@ -100,6 +102,7 @@ vi.mock("@/lib/utils/keyword-matcher", () => ({
 vi.mock("@/lib/utils/rate-limiter", () => ({
   reserveDMSlot: mockReserveDMSlot,
   releaseDMSlot: mockReleaseDMSlot,
+  reservePublicReplySlot: mockReservePublicReplySlot,
 }));
 
 vi.mock("@/lib/billing/usage", () => ({
@@ -263,6 +266,7 @@ beforeEach(() => {
     reserved: true,
   });
   mockReleaseDMSlot.mockResolvedValue(0);
+  mockReservePublicReplySlot.mockResolvedValue(true);
   mockReleaseWorkspaceDMReservation.mockResolvedValue({ count: 1 });
   mockSendPrivateReply.mockResolvedValue({
     recipient_id: "commenter_999",
@@ -1763,4 +1767,54 @@ it("retains the public reply claim if sending succeeded but its log write failed
   await process({ ...createMockJob(), id: "next-poll" });
   expect(sendCommentReply).toHaveBeenCalledTimes(1);
   expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+});
+
+describe("public reply rate limit", () => {
+  const publicReplyCampaign = {
+    ...mockAutomation,
+    publicReplyEnabled: true,
+    publicReplyMessages: ["Sent!"],
+  };
+
+  it("takes a slot before posting a public reply", async () => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockResolvedValue({ id: "public-reply" });
+    mockPrisma.automation.findMany.mockResolvedValue([publicReplyCampaign]);
+
+    await getProcessor()(createMockJob());
+
+    expect(mockReservePublicReplySlot).toHaveBeenCalledWith("ig_456");
+    expect(sendCommentReply).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["the hourly cap is reached", () => mockReservePublicReplySlot.mockResolvedValue(false)],
+    ["Redis cannot be reached", () => mockReservePublicReplySlot.mockRejectedValue(new Error("down"))],
+  ])("holds the reply unclaimed, and still sends the DM, when %s", async (_case, arrange) => {
+    const { sendCommentReply } = await import("@/lib/meta/client");
+    vi.mocked(sendCommentReply).mockClear();
+    arrange();
+    mockPrisma.automation.findMany.mockResolvedValue([publicReplyCampaign]);
+
+    await getProcessor()(createMockJob());
+
+    expect(sendCommentReply).not.toHaveBeenCalled();
+    // Marking it unconfirmed would stop the polling sweep ever retrying it.
+    expect(mockPrisma.dmLog.updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ publicReplyDeliveryUnconfirmed: true }),
+      })
+    );
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { publicReplyError: "Public reply rate limit reached" },
+      })
+    );
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not take a slot for a campaign without public replies", async () => {
+    await getProcessor()(createMockJob());
+    expect(mockReservePublicReplySlot).not.toHaveBeenCalled();
+  });
 });

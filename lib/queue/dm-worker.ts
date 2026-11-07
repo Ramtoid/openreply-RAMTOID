@@ -40,7 +40,11 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
-import { reserveDMSlot, releaseDMSlot } from "@/lib/utils/rate-limiter";
+import {
+  reserveDMSlot,
+  releaseDMSlot,
+  reservePublicReplySlot,
+} from "@/lib/utils/rate-limiter";
 import {
   releaseWorkspaceDMReservation,
   reserveWorkspaceDMSend,
@@ -452,11 +456,27 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         : automation.publicReplyMessage
           ? [automation.publicReplyMessage]
           : [];
-    if (
+    const wantsPublicReply =
       automation.publicReplyEnabled &&
       replyPool.length > 0 &&
       !existingLog?.publicReplySentAt &&
-      !existingLog?.publicReplyDeliveryUnconfirmed &&
+      !existingLog?.publicReplyDeliveryUnconfirmed;
+    // Checked before the claim: a claim marks the reply as possibly delivered,
+    // which would stop it being retried. Left unclaimed, the polling sweep
+    // brings the comment back once the hour's window has passed.
+    const publicReplySlot =
+      wantsPublicReply &&
+      (await reservePublicReplySlot(instagramAccountId).catch(() => false));
+    if (wantsPublicReply && !publicReplySlot) {
+      await prisma.dmLog.update({
+        where: {
+          automationId_commentId: { automationId: automation.id, commentId },
+        },
+        data: { publicReplyError: "Public reply rate limit reached" },
+      });
+    }
+    if (
+      publicReplySlot &&
       await claimCommentDelivery(automation.id, commentId, "public")
     ) {
       try {

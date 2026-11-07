@@ -3,20 +3,36 @@
  *
  * Redis-based rate limiter for Instagram private replies.
  *
- * The cap matches Meta's documented limit for this exact call: 750 private
- * replies per hour per Instagram professional account, for comments on posts
- * and reels. Exceeding it risks 429s and app-level restrictions, so the worker
- * requeues rather than pushing through.
+ * Meta documents a limit for this exact call of 750 private replies per hour
+ * per Instagram professional account, for comments on posts and reels.
+ * Exceeding it risks 429s and app-level restrictions, so the worker requeues
+ * rather than pushing through.
  * https://developers.facebook.com/docs/graph-api/overview/rate-limiting/
  *
- * Note this is a hard ceiling with no headroom. If Meta throttles before the
- * documented limit, or other calls on the same account share the bucket, lower
- * this value.
+ * This build stays well under that by default (200 per hour), since Meta can
+ * throttle before the documented limit. DM_RATE_LIMIT_PER_HOUR changes it; values
+ * above Meta's limit are clamped to it.
+ *
+ * Public comment replies have a separate counter of their own, with
+ * PUBLIC_REPLY_RATE_LIMIT_PER_HOUR. Meta publishes no such figure for them; the
+ * default simply matches the private-reply cap.
  */
 
 import Redis from "ioredis";
 
-const RATE_LIMIT_MAX = 750; // private replies per hour, per Meta's documented cap
+const META_PRIVATE_REPLY_LIMIT = 750; // per hour, Meta's documented cap
+const DEFAULT_HOURLY_LIMIT = 200;
+
+function readHourlyLimit(name: string): number {
+  const value = Number(process.env[name]);
+  if (!Number.isInteger(value) || value <= 0) return DEFAULT_HOURLY_LIMIT;
+  return Math.min(value, META_PRIVATE_REPLY_LIMIT);
+}
+
+const RATE_LIMIT_MAX = readHourlyLimit("DM_RATE_LIMIT_PER_HOUR");
+const PUBLIC_REPLY_RATE_LIMIT_MAX = readHourlyLimit(
+  "PUBLIC_REPLY_RATE_LIMIT_PER_HOUR"
+);
 const RATE_LIMIT_WINDOW = 3600; // 1 hour in seconds
 const REQUEUE_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 const MAX_REQUEUE_ATTEMPTS = 3;
@@ -189,6 +205,24 @@ export async function reserveDMSlot(
 }
 
 /**
+ * Atomically reserve a public comment reply slot for an Instagram account.
+ * Returns false once this hour's cap is reached. Nothing is queued for later:
+ * the polling sweep brings back any comment whose public reply never posted.
+ */
+export async function reservePublicReplySlot(
+  instagramAccountId: string
+): Promise<boolean> {
+  const result = await getRedis().eval(
+    RESERVE_DM_SLOT_SCRIPT,
+    1,
+    `rate:public:${instagramAccountId}`,
+    PUBLIC_REPLY_RATE_LIMIT_MAX,
+    RATE_LIMIT_WINDOW
+  );
+  return Array.isArray(result) && toScriptNumber(result[0]) === 1;
+}
+
+/**
  * Release a DM slot previously taken by reserveDMSlot.
  *
  * reserveDMSlot increments the hourly counter before the send, so concurrent
@@ -251,4 +285,10 @@ export async function resetRateLimit(
 }
 
 // Export constants for use in tests
-export { RATE_LIMIT_MAX, RATE_LIMIT_WINDOW, REQUEUE_DELAY_MS, MAX_REQUEUE_ATTEMPTS };
+export {
+  RATE_LIMIT_MAX,
+  PUBLIC_REPLY_RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW,
+  REQUEUE_DELAY_MS,
+  MAX_REQUEUE_ATTEMPTS,
+};

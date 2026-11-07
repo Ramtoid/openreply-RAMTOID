@@ -34,7 +34,9 @@ import {
   incrementDMCounter,
   reserveDMSlot,
   releaseDMSlot,
+  reservePublicReplySlot,
   RATE_LIMIT_MAX,
+  PUBLIC_REPLY_RATE_LIMIT_MAX,
 } from "../lib/utils/rate-limiter";
 
 beforeEach(() => {
@@ -156,4 +158,65 @@ describe("releaseDMSlot", () => {
     expect(count).toBe(0);
     expect(mockDel).toHaveBeenCalledWith("rate:dm:account_123");
   });
+});
+
+describe("reservePublicReplySlot", () => {
+  it("counts public replies separately from DMs", async () => {
+    mockEval.mockResolvedValue([1, 1, PUBLIC_REPLY_RATE_LIMIT_MAX - 1]);
+
+    await expect(reservePublicReplySlot("account_123")).resolves.toBe(true);
+
+    expect(mockEval).toHaveBeenCalledWith(
+      expect.any(String),
+      1,
+      "rate:public:account_123",
+      PUBLIC_REPLY_RATE_LIMIT_MAX,
+      3600
+    );
+  });
+
+  it("refuses once the hourly cap is reached", async () => {
+    mockEval.mockResolvedValue([0, PUBLIC_REPLY_RATE_LIMIT_MAX, 0]);
+
+    await expect(reservePublicReplySlot("account_123")).resolves.toBe(false);
+  });
+});
+
+describe("hourly limits", () => {
+  async function loadWith(name: string, value: string) {
+    vi.resetModules();
+    vi.stubEnv(name, value);
+    const limiter = await import("../lib/utils/rate-limiter");
+    vi.unstubAllEnvs();
+    vi.stubEnv("REDIS_URL", "redis://localhost:6379");
+    return limiter;
+  }
+
+  it("default to 200 per hour", () => {
+    expect(RATE_LIMIT_MAX).toBe(200);
+    expect(PUBLIC_REPLY_RATE_LIMIT_MAX).toBe(200);
+  });
+
+  it("can be set per kind from the environment", async () => {
+    const dm = await loadWith("DM_RATE_LIMIT_PER_HOUR", "50");
+    expect(dm.RATE_LIMIT_MAX).toBe(50);
+    expect(dm.PUBLIC_REPLY_RATE_LIMIT_MAX).toBe(200);
+
+    const pub = await loadWith("PUBLIC_REPLY_RATE_LIMIT_PER_HOUR", "30");
+    expect(pub.RATE_LIMIT_MAX).toBe(200);
+    expect(pub.PUBLIC_REPLY_RATE_LIMIT_MAX).toBe(30);
+  });
+
+  it("never exceed Meta's documented limit", async () => {
+    const limiter = await loadWith("DM_RATE_LIMIT_PER_HOUR", "5000");
+    expect(limiter.RATE_LIMIT_MAX).toBe(750);
+  });
+
+  it.each(["", "0", "-5", "abc", "1.5"])(
+    "fall back to the default for the invalid value %j",
+    async (value) => {
+      const limiter = await loadWith("DM_RATE_LIMIT_PER_HOUR", value);
+      expect(limiter.RATE_LIMIT_MAX).toBe(200);
+    }
+  );
 });
