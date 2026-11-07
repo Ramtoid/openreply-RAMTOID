@@ -11,6 +11,8 @@
  * both are true:
  *   1. the comment matches the campaign keyword, and
  *   2. the account owner has not already replied to it.
+ * Comments older than the campaign's last activation are never considered, so
+ * going live or resuming a campaign cannot DM people who commented before it.
  * The reply check reads the comment's actual replies on Instagram, so a comment
  * you (or the tool) already answered is skipped — the poll never re-touches
  * handled comments. Each sweep is capped so it can never flood the comment API
@@ -73,6 +75,7 @@ export async function reconcileComments(): Promise<void> {
     select: {
       id: true,
       name: true,
+      activatedAt: true,
       postId: true,
       matchAnyPost: true,
       matchAnyWord: true,
@@ -124,6 +127,7 @@ async function sweepCampaign({
   automation: {
     id: string;
     name: string;
+    activatedAt: Date;
     postId: string | null;
     matchAnyPost: boolean;
     matchAnyWord: boolean;
@@ -190,6 +194,7 @@ async function sweepCampaign({
   if (mediaIds.length === 0) return stat;
 
   const queue = getDMQueue();
+  const activatedAtMs = automation.activatedAt.getTime();
 
   for (const mediaId of mediaIds) {
     let comments: InstagramComment[];
@@ -204,11 +209,14 @@ async function sweepCampaign({
       continue;
     }
 
-    // Keep only comments that (a) aren't the account's own, (b) match the
-    // keyword, and (c) have no reply from the account owner yet.
+    // Keep only comments that (a) aren't the account's own, (b) were left after
+    // the campaign went live, (c) match the keyword, and (d) have no reply from
+    // the account owner yet. A comment with a missing or unreadable timestamp
+    // can't be shown to be recent, so it is left alone.
     const needsAction = comments.filter((c) => {
       const authorId = c.from?.id;
       if (!authorId || authorId === account.instagramId) return false;
+      if (!(Date.parse(c.timestamp) >= activatedAtMs)) return false;
 
       const matched = automation.matchAnyWord
         ? true

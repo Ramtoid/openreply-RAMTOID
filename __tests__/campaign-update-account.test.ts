@@ -93,3 +93,46 @@ describe("PATCH /api/automations", () => {
     expect(mockPrisma.instagramAccount.findFirst).not.toHaveBeenCalled();
   });
 });
+
+describe("PATCH /api/automations activation time", () => {
+  function existing(isActive: boolean) {
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      id: "automation_123",
+      workspaceId: "workspace_123",
+      instagramAccountId: "account_old",
+      isActive,
+    });
+  }
+
+  function writtenData() {
+    return mockPrisma.automation.update.mock.calls[0][0].data;
+  }
+
+  it("restarts the window when a paused campaign goes live", async () => {
+    existing(false);
+    const before = Date.now();
+
+    await PATCH(patchRequest({ isActive: true }));
+
+    expect(writtenData().isActive).toBe(true);
+    expect(writtenData().activatedAt.getTime()).toBeGreaterThanOrEqual(before);
+  });
+
+  it("does not move it when saving a campaign that is already live", async () => {
+    existing(true);
+    await PATCH(patchRequest({ isActive: true, name: "Renamed" }));
+    expect(writtenData()).not.toHaveProperty("activatedAt");
+  });
+
+  it("does not move it when pausing", async () => {
+    existing(true);
+    await PATCH(patchRequest({ isActive: false }));
+    expect(writtenData()).not.toHaveProperty("activatedAt");
+  });
+
+  it("does not move it when editing a paused campaign", async () => {
+    existing(false);
+    await PATCH(patchRequest({ name: "Renamed" }));
+    expect(writtenData()).not.toHaveProperty("activatedAt");
+  });
+});

@@ -85,6 +85,7 @@ describe("comment polling does not recreate unsafe sends", () => {
       {
         id: "campaign",
         name: "Campaign",
+        activatedAt: new Date(0),
         workspaceId: "workspace",
         postId: POST,
         matchAnyWord: false,
@@ -135,4 +136,71 @@ describe("comment polling does not recreate unsafe sends", () => {
         expect(data.commentId).toBe("new");
     },
   );
+});
+
+describe("comment polling only acts on comments left after activation", () => {
+  const ACTIVATED_AT = new Date("2026-11-01T12:00:00.000Z");
+
+  function comment(id: string, timestamp?: string) {
+    return { id, text: "AI", from: { id: `reader-${id}` }, timestamp };
+  }
+
+  beforeEach(() => {
+    queueAdd.mockReset();
+    mockPrisma.operationalEvent.create.mockResolvedValue({});
+    mockPrisma.$queryRaw.mockResolvedValue([]);
+    mockPrisma.dmLog.findMany.mockResolvedValue([]);
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        id: "campaign",
+        name: "Campaign",
+        activatedAt: ACTIVATED_AT,
+        workspaceId: "workspace",
+        postId: POST,
+        matchAnyWord: false,
+        keywords: ["AI"],
+        publicReplyEnabled: false,
+        instagramAccount: {
+          id: "connection",
+          instagramId: "owner",
+          provider: "META",
+          accessToken: "test",
+        },
+      },
+    ]);
+  });
+
+  it("never enqueues a comment from before the campaign went live", async () => {
+    readComments.mockResolvedValue([
+      comment("before", "2026-11-01T11:59:59+0000"),
+      comment("after", "2026-11-01T12:00:01+0000"),
+    ]);
+
+    await reconcileComments();
+
+    expect(queueAdd).toHaveBeenCalledTimes(1);
+    expect(queueAdd.mock.calls[0][1].commentId).toBe("after");
+  });
+
+  it("enqueues nothing when every comment predates activation", async () => {
+    readComments.mockResolvedValue([
+      comment("old-1", "2026-10-31T09:00:00+0000"),
+      comment("old-2", "2026-11-01T11:00:00+0000"),
+    ]);
+
+    await reconcileComments();
+
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
+
+  it("leaves alone a comment whose age cannot be established", async () => {
+    readComments.mockResolvedValue([
+      comment("no-time"),
+      comment("bad-time", "not a date"),
+    ]);
+
+    await reconcileComments();
+
+    expect(queueAdd).not.toHaveBeenCalled();
+  });
 });

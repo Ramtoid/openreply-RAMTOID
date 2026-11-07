@@ -218,6 +218,11 @@ model Automation {
   publicReplyMessage String?
   publicReplyMessages String[] @default([])
   isActive       Boolean @default(true)
+  // When the campaign last went live. The polling sweep ignores comments older
+  // than this, so activating or resuming a campaign never DMs old comments.
+  // Not createdAt (a paused campaign can go live much later) and not updatedAt
+  // (any edit moves it, which would drop comments awaiting a sweep).
+  activatedAt    DateTime @default(now())
   wholeWordMatch Boolean @default(true)
   reportShareSlug    String? @unique
   reportShareEnabled Boolean @default(true)

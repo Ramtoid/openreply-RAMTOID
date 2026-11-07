@@ -548,7 +548,14 @@ export async function PATCH(request: NextRequest) {
   const updated = await prisma.$transaction(async (tx) => {
     const campaign = await tx.automation.update({
       where: { id: automationId },
-      data: automationData,
+      data: {
+        ...automationData,
+        // Going from paused to live restarts the window the polling sweep may
+        // act on. Saving an already live campaign must not move it.
+        ...(automationData.isActive === true && !existing.isActive
+          ? { activatedAt: new Date() }
+          : {}),
+      },
     });
 
     await syncCampaignLinks(tx, {
