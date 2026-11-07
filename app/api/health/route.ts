@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { getDMQueue, getRedisConnection } from "@/lib/queue/client";
 import { getWorkerHealth } from "@/lib/ops/worker-health";
+import { getCurrentUserId } from "@/lib/auth";
 
 export const runtime = "nodejs";
 // Health must reflect live state (worker heartbeat, queue depth), never a
@@ -15,27 +16,29 @@ interface HealthCheck {
   detail?: string;
 }
 
+// Driver errors can carry hostnames and connection strings, so they go to the
+// server log and never into a response.
+function logCheckFailure(check: string, error: unknown) {
+  console.error(`[Health] ${check} check failed:`, error);
+}
+
 async function checkDatabase(): Promise<HealthCheck> {
   try {
     await prisma.$queryRaw`SELECT 1`;
     return { status: "ok" };
   } catch (error) {
-    return {
-      status: "error",
-      detail: error instanceof Error ? error.message : "Database check failed",
-    };
+    logCheckFailure("Database", error);
+    return { status: "error" };
   }
 }
 
 async function checkRedis(): Promise<HealthCheck> {
   try {
     const pong = await getRedisConnection().ping();
-    return { status: pong === "PONG" ? "ok" : "error", detail: pong };
+    return { status: pong === "PONG" ? "ok" : "error" };
   } catch (error) {
-    return {
-      status: "error",
-      detail: error instanceof Error ? error.message : "Redis check failed",
-    };
+    logCheckFailure("Redis", error);
+    return { status: "error" };
   }
 }
 
@@ -73,10 +76,17 @@ async function checkQueue(): Promise<HealthCheck & { counts?: unknown }> {
     }
     return { status: "ok", counts };
   } catch (error) {
-    return {
-      status: "error",
-      detail: error instanceof Error ? error.message : "Queue check failed",
-    };
+    logCheckFailure("Queue", error);
+    return { status: "error" };
+  }
+}
+
+async function hasSession(): Promise<boolean> {
+  try {
+    return Boolean(await getCurrentUserId());
+  } catch {
+    // Sessions live in the database, which may be the very thing that is down.
+    return false;
   }
 }
 
@@ -85,12 +95,10 @@ export async function GET() {
     checkDatabase(),
     checkRedis(),
     checkQueue(),
-    getWorkerHealth().catch((error) => ({
-      healthy: false,
-      heartbeat: null,
-      ageMs: null,
-      error: error instanceof Error ? error.message : "Worker check failed",
-    })),
+    getWorkerHealth().catch((error) => {
+      logCheckFailure("Worker", error);
+      return { healthy: false, heartbeat: null, ageMs: null };
+    }),
   ]);
 
   const healthy =
@@ -99,16 +107,30 @@ export async function GET() {
     queue.status === "ok" &&
     worker.healthy;
 
+  const status = healthy ? "ok" : "degraded";
+  const httpStatus = healthy ? 200 : 503;
+
+  // The overall status already covers all four checks, which is what an uptime
+  // monitor needs. The breakdown is for someone signed in.
+  if (!(await hasSession())) {
+    return NextResponse.json({ status }, { status: httpStatus });
+  }
+
   return NextResponse.json(
     {
-      status: healthy ? "ok" : "degraded",
+      status,
       checks: {
         database,
         redis,
         queue,
-        worker,
+        // Not the raw heartbeat, which carries the worker's hostname and pid.
+        worker: {
+          healthy: worker.healthy,
+          ageMs: worker.ageMs,
+          startedAt: worker.heartbeat?.startedAt ?? null,
+        },
       },
     },
-    { status: healthy ? 200 : 503 }
+    { status: httpStatus }
   );
 }
