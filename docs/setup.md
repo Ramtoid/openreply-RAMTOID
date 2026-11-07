@@ -105,7 +105,7 @@ Copy `.env.example` to `.env` for local work, or set these in Vercel and Railway
 | `REDIS_URL` | Redis connection string. Must support blocking commands, so an HTTP-only Redis will not work with BullMQ. |
 | `RESEND_API_KEY` | Resend key. Login is email magic links only, so without this nobody can sign in. |
 | `EMAIL_FROM` | A sender on a domain you verified in Resend. The placeholder will not deliver. |
-| `ALLOWED_EMAILS` | Optional. Comma-separated allowlist of addresses that may sign in, case insensitive. Unset, anyone who reaches your public URL can request a magic link and gets their own workspace, which is worth closing on an instance you run for yourself. |
+| `ALLOWED_EMAILS` | Required in production. Comma-separated allowlist of addresses that may sign in, case insensitive. While it is empty, nobody can sign in, so an instance is never left open to signup by accident. |
 | `EMAIL_SERVER` | Optional. An SMTP URL, for example `smtps://login%40example.com:password@mail.example.com:465`. Set it to send magic links through your own mail server instead of Resend; then `RESEND_API_KEY` is not needed. URL-encode special characters in the user and password (`@` becomes `%40`). Port 465 with `smtps://` is implicit TLS, port 587 with `smtp://` is STARTTLS. |
 
 **Direct Meta only.** Leave these unset if all accounts use Zernio:
@@ -126,7 +126,9 @@ Optional, for tuning the polling reconciler (defaults are fine to start):
 | --- | --- | --- |
 | `COMMENT_POLL_INTERVAL_MS` | `300000` | How often the worker sweeps for missed comments (5 min). |
 | `COMMENT_POLL_MAX_PER_SWEEP` | `30` | Max new comments each campaign acts on per sweep. Keep it conservative; higher gets closer to Instagram's rate limits. |
-| `COMMENT_POLL_LOOKBACK_HOURS` | `72` | How far back a sweep considers comments. |
+| `COMMENT_POLL_LOOKBACK_HOURS` | `72` | How far back a sweep considers comments. Comments from before the campaign last went live are ignored regardless. |
+| `DM_RATE_LIMIT_PER_HOUR` | `200` | Private replies per hour, per Instagram account. Cannot exceed 750, Meta's documented limit. Set it on the worker. |
+| `PUBLIC_REPLY_RATE_LIMIT_PER_HOUR` | `200` | Public comment replies per hour, per Instagram account. Set it on the worker. |
 
 ## Connect through Zernio
 
@@ -274,7 +276,7 @@ Meta's `/me` returns two IDs. The `id` field is app-scoped. The `user_id` field 
 4. From a different Instagram account, comment `TEST` on that post. It must be a different account, because OpenReply ignores your own comments on purpose.
 5. Watch for the DM. If nothing arrives, check the DM Logs page and `/api/health`.
 
-Hit `/api/health` any time. It reports the database, Redis, queue, and worker heartbeat. If `worker.healthy` is false, the worker is not running or cannot reach Redis, and no DM will send even though webhooks are being received.
+Hit `/api/health` any time. Without a session it returns only the overall `status`: `ok` means the database, Redis, queue, and worker heartbeat are all healthy, and `degraded` (HTTP 503) means at least one is not. Open it in a browser where you are signed in to see each check. If `worker.healthy` is false, the worker is not running or cannot reach Redis, and no DM will send even though webhooks are being received. Error details are in the web app's server logs, not in the response.
 
 If you want to inspect where a comment stopped, the Postgres tables tell you: `WebhookEvent` for delivery, `DmLog` for send status and errors, `OperationalEvent` for worker crashes and the polling reconciler's sweep logs.
 
@@ -367,7 +369,7 @@ Rules:
 Start by reading the docs, then ask me question 1.
 ```
 
-By the end, `/api/health` returns `status: ok` with `worker.healthy: true`, and a comment with your keyword from a second account produces a `SENT` row in the DM logs. If you get there, you are done.
+By the end, `/api/health` returns `status: ok`, and a comment with your keyword from a second account produces a `SENT` row in the DM logs. If you get there, you are done.
 
 ## Letting other people use your instance
 
